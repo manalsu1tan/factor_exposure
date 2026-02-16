@@ -187,3 +187,13 @@ Generate explained-vs-realized attribution diagnostics and optional per-day resi
 ```bash
 python -m factor_exposure.scripts.attribution_quality_report --holdings holdings.json --start_date 2025-01-01 --end_date 2025-12-31 --out reports/attribution_quality_report.md --daily_csv_out reports/attribution_quality_daily.csv
 ```
+
+## Minimal Frontend (`web/`)
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173` and point API Base to `http://127.0.0.1:8000`.

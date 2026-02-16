@@ -4,6 +4,7 @@ from datetime import date
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from factor_exposure.explain.explainer import explain_portfolio_report
@@ -18,6 +19,16 @@ from factor_exposure.reporting.report import build_portfolio_report
 
 
 app = FastAPI(title="factor_exposure", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class Holding(BaseModel):
