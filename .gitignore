@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Data + model artifacts
+data/
+!data/README.md
+!data/universe.sample.csv
+
+# Notebooks
+.ipynb_checkpoints/
+

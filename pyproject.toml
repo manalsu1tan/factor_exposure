@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "factor-exposure"
+version = "0.1.0"
+description = "Daily US equities factor exposure + risk decomposition"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.110",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "polars>=1.5",
+  "pyarrow>=15.0",
+  "pydantic>=2.6",
+  "uvicorn>=0.27",
+  "yfinance>=0.2.36",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/factor_exposure"]
+
+[tool.ruff]
+line-length = 100
