@@ -24,6 +24,9 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.4",
 ]
+llm = [
+  "openai>=1.40",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/factor_exposure"]

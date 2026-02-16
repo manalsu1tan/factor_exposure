@@ -1,0 +1,6 @@
+[
+  { "ticker": "AAPL", "weight": 0.30 },
+  { "ticker": "MSFT", "weight": 0.30 },
+  { "ticker": "NVDA", "weight": 0.20 },
+  { "ticker": "JPM", "weight": 0.20 }
+]

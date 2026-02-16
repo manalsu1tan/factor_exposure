@@ -34,6 +34,97 @@ def _join_wide_on_date(frames: List[pl.DataFrame]) -> pl.DataFrame:
     return out.sort("date")
 
 
+def _ticker_quality(adj_close_df: pl.DataFrame, volume_df: pl.DataFrame, tickers: List[str]) -> pl.DataFrame:
+    total_days = max(adj_close_df.height, 1)
+    rows = []
+    for ticker in tickers:
+        px = adj_close_df.select("date", ticker).drop_nulls(subset=[ticker]).sort("date")
+        vol = volume_df.select("date", ticker).drop_nulls(subset=[ticker]).sort("date")
+        px_days = px.height
+        vol_days = vol.height
+        rows.append(
+            {
+                "ticker": ticker,
+                "price_obs_days": px_days,
+                "volume_obs_days": vol_days,
+                "price_coverage_ratio": float(px_days / total_days),
+                "volume_coverage_ratio": float(vol_days / total_days),
+                "first_price_date": px.select(pl.col("date").min()).item() if px_days > 0 else None,
+                "last_price_date": px.select(pl.col("date").max()).item() if px_days > 0 else None,
+            }
+        )
+    return pl.DataFrame(rows).sort("ticker")
+
+
+def _factor_return_stats(factor_returns: pl.DataFrame, factors: List[str]) -> dict:
+    stats = {}
+    n = factor_returns.height
+    for f in factors:
+        col = factor_returns.get_column(f).to_numpy().astype(float, copy=False)
+        mean = float(np.nanmean(col)) if n else 0.0
+        std = float(np.nanstd(col, ddof=1)) if n > 1 else 0.0
+        tstat = float(mean / (std / np.sqrt(n))) if n > 1 and std > 0 else 0.0
+        stats[f] = {"mean": mean, "std": std, "tstat": tstat}
+    return stats
+
+
+def _fit_diagnostics(exposures: pl.DataFrame, returns: pl.DataFrame, factor_returns: pl.DataFrame, factors: List[str]) -> dict:
+    merged = exposures.join(returns, on=["date", "ticker"], how="inner").drop_nulls(subset=[*factors, "ret"])
+    fr_rows = {
+        r["date"]: np.array([float(r[f]) for f in factors], dtype=float)
+        for r in factor_returns.iter_rows(named=True)
+    }
+
+    rows = []
+    for g in merged.partition_by("date", as_dict=False, maintain_order=True):
+        d = g.get_column("date")[0]
+        if d not in fr_rows:
+            continue
+        X = g.select(factors).to_numpy().astype(float, copy=False)
+        y = g.get_column("ret").to_numpy().astype(float, copy=False)
+        yhat = X @ fr_rows[d]
+        resid = y - yhat
+        sse = float(np.sum(resid * resid))
+        y_mean = float(np.mean(y))
+        sst = float(np.sum((y - y_mean) ** 2))
+        r2 = float(1.0 - sse / sst) if sst > 0 else 0.0
+        rows.append(
+            {
+                "date": d,
+                "n_assets": int(X.shape[0]),
+                "r2": r2,
+                "residual_std": float(np.std(resid, ddof=0)),
+            }
+        )
+
+    if not rows:
+        return {
+            "fit_dates": 0,
+            "n_assets_mean": 0.0,
+            "n_assets_min": 0,
+            "n_assets_max": 0,
+            "r2_mean": 0.0,
+            "r2_median": 0.0,
+            "r2_positive_ratio": 0.0,
+            "residual_std_mean": 0.0,
+        }
+
+    diag = pl.DataFrame(rows)
+    r2_vals = diag.get_column("r2").to_numpy().astype(float, copy=False)
+    n_vals = diag.get_column("n_assets").to_numpy().astype(float, copy=False)
+    resid_vals = diag.get_column("residual_std").to_numpy().astype(float, copy=False)
+    return {
+        "fit_dates": int(diag.height),
+        "n_assets_mean": float(np.mean(n_vals)),
+        "n_assets_min": int(np.min(n_vals)),
+        "n_assets_max": int(np.max(n_vals)),
+        "r2_mean": float(np.mean(r2_vals)),
+        "r2_median": float(np.median(r2_vals)),
+        "r2_positive_ratio": float(np.mean(r2_vals > 0.0)),
+        "residual_std_mean": float(np.mean(resid_vals)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--universe", type=str, required=True, help="CSV with column 'ticker'")
@@ -118,13 +209,54 @@ def main() -> None:
     factor_cov = ewma_factor_cov(fit.factor_returns, factors=DEFAULT_FACTORS, halflife=60)
     specific_var = ewma_specific_var(fit.residuals, halflife=60)
 
+    ticker_quality = _ticker_quality(adj_close_df=adj_close_df, volume_df=volume_df, tickers=universe_tickers)
+    fit_diag = _fit_diagnostics(
+        exposures=exposures,
+        returns=returns,
+        factor_returns=fit.factor_returns,
+        factors=DEFAULT_FACTORS,
+    )
+    factor_stats = _factor_return_stats(factor_returns=fit.factor_returns, factors=DEFAULT_FACTORS)
+
+    data_quality = {
+        "as_of": as_of.isoformat(),
+        "calendar_start": start.isoformat(),
+        "universe_requested": len(tickers) - 1,
+        "universe_loaded": len(universe_tickers),
+        "skipped_tickers": sorted(skipped_tickers),
+        "model_days": int(adj_close_df.height),
+        "returns_rows": int(returns.height),
+        "exposures_rows": int(exposures.height),
+        "factor_return_rows": int(fit.factor_returns.height),
+        "specific_return_rows": int(fit.residuals.height),
+        "avg_price_coverage_ratio": float(
+            ticker_quality.select(pl.col("price_coverage_ratio").mean()).item() if ticker_quality.height > 0 else 0.0
+        ),
+        "avg_volume_coverage_ratio": float(
+            ticker_quality.select(pl.col("volume_coverage_ratio").mean()).item() if ticker_quality.height > 0 else 0.0
+        ),
+    }
+
+    model_diagnostics = {
+        "as_of": as_of.isoformat(),
+        "factor_count": len(DEFAULT_FACTORS),
+        "covariance_condition_number": float(np.linalg.cond(factor_cov)),
+        "fit": fit_diag,
+        "factor_return_stats": factor_stats,
+    }
+
     out_root = data_root / "model" / "latest"
     out_root.mkdir(parents=True, exist_ok=True)
 
     exposures.write_parquet(out_root / "exposures.parquet")
     fit.factor_returns.write_parquet(out_root / "factor_returns.parquet")
+    fit.residuals.write_parquet(out_root / "specific_returns.parquet")
+    returns.write_parquet(out_root / "asset_returns.parquet")
     np.save(out_root / "factor_cov.npy", factor_cov)
     specific_var.write_parquet(out_root / "specific_var.parquet")
+    ticker_quality.write_parquet(out_root / "ticker_quality.parquet")
+    (out_root / "data_quality.json").write_text(json.dumps(data_quality, indent=2, sort_keys=True))
+    (out_root / "model_diagnostics.json").write_text(json.dumps(model_diagnostics, indent=2, sort_keys=True))
 
     metadata = {
         "as_of": as_of.isoformat(),
