@@ -150,3 +150,41 @@ Validation CSV columns:
 - `first_date` (date)
 - `last_date` (date)
 - `reason` (string)
+
+## 14) Position events log
+Path:
+- `data/positions/events.parquet`
+
+Parquet columns:
+- `event_id` (string)
+- `portfolio_id` (string)
+- `event_time` (datetime)
+- `ticker` (string)
+- `event_type` (`TRADE` | `ADJUSTMENT` | `SPLIT` | `CASH_DIVIDEND`)
+- canonicalized to (`TRADE` | `MANUAL_ADJUSTMENT` | `SPLIT` | `DIVIDEND`)
+- `quantity` (float)
+- `side` (string, nullable)
+- `price` (float, nullable)
+- `fees` (float)
+- `split_ratio` (float, nullable)
+- `cash_amount_per_share` (float, nullable)
+- `source` (string, nullable)
+
+## 15) Position snapshot response schema (API object)
+Produced by:
+- `POST /positions/snapshot`
+
+Per-row fields:
+- `ticker` (string)
+- `quantity` (float)
+- `avg_cost` (float)
+- `market_price` (float, nullable)
+- `price_as_of` (date, nullable)
+- `market_value` (float, nullable)
+- `realized_pnl` (float)
+- `dividends_pnl` (float)
+- `total_pnl` (float)
+- `unrealized_pnl` (float, nullable)
+- `economic_total_pnl` (float, nullable)
+- `last_event_time` (datetime)
+- `change_reasons` (list[string], subset of `trade|manual_adjustment|split|dividend`)

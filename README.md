@@ -83,6 +83,11 @@ Then POST:
 - `http://127.0.0.1:8000/portfolio/scenario`
 - `http://127.0.0.1:8000/portfolio/scenario/templates`
 - `http://127.0.0.1:8000/portfolio/explain`
+- `http://127.0.0.1:8000/portfolio/realtime/analytics`
+- `http://127.0.0.1:8000/portfolio/eod/analytics`
+- `http://127.0.0.1:8000/portfolio/reconcile/close`
+- `http://127.0.0.1:8000/positions/events`
+- `http://127.0.0.1:8000/positions/snapshot`
 
 Example request body:
 ```json
@@ -142,6 +147,46 @@ curl -X POST http://127.0.0.1:8000/portfolio/explain \
 - Data + artifact schemas: `docs/schemas.md`
 - API request/response: `docs/api.md`
 - Factor formulas, signs, intuition: `docs/factors.md`
+- Next phase position engine layout: `docs/positions_phase2.md`
+
+## Position Events + Snapshot (Phase 2 scaffold)
+
+Append events:
+```bash
+curl -X POST http://127.0.0.1:8000/positions/events \
+  -H "Content-Type: application/json" \
+  -d '{"portfolio_id":"demo_book","events":[{"event_time":"2025-01-02T14:30:00Z","ticker":"AAPL","event_type":"TRADE","side":"BUY","quantity":100,"price":180.5}]}'
+```
+
+Build snapshot:
+```bash
+curl -X POST http://127.0.0.1:8000/positions/snapshot \
+  -H "Content-Type: application/json" \
+  -d '{"portfolio_id":"demo_book","as_of":"2025-12-31T21:00:00Z","include_closed":false}'
+```
+
+Snapshot now includes cached-market valuation fields (`market_price`, `market_value`, `unrealized_pnl`) when price cache files are present under `data/cache/yfinance/prices/`.
+
+Realtime analytics from event-sourced positions:
+```bash
+curl -X POST http://127.0.0.1:8000/portfolio/realtime/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"portfolio_id":"demo_book","as_of":"2025-12-31"}'
+```
+
+EOD analytics from official close prices:
+```bash
+curl -X POST http://127.0.0.1:8000/portfolio/eod/analytics \
+  -H "Content-Type: application/json" \
+  -d '{"portfolio_id":"demo_book","as_of":"2025-12-31","strict_close":true}'
+```
+
+Close reconciliation report:
+```bash
+curl -X POST http://127.0.0.1:8000/portfolio/reconcile/close \
+  -H "Content-Type: application/json" \
+  -d '{"portfolio_id":"demo_book","as_of":"2025-12-31"}'
+```
 
 ## Lightweight Report
 

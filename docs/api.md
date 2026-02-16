@@ -97,6 +97,52 @@ Builds a compact portfolio report and returns plain-English interpretation.
 }
 ```
 
+## `POST /portfolio/exposure-timeseries`
+
+Returns portfolio factor exposure time series for the provided holdings/date window.
+
+### Request schema
+```json
+{
+  "start_date": "YYYY-MM-DD (optional)",
+  "end_date": "YYYY-MM-DD (optional)",
+  "holdings": [
+    {"ticker": "AAPL", "weight": 0.50},
+    {"ticker": "MSFT", "weight": 0.50}
+  ]
+}
+```
+
+## `GET /universe/tickers`
+
+Returns ticker symbols in the model universe for current artifact `as_of`.
+
+### Response schema
+```json
+{
+  "as_of": "YYYY-MM-DD",
+  "count": 500,
+  "tickers": ["AAPL", "MSFT", "NVDA"]
+}
+```
+
+### Response schema
+```json
+{
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "rows": [
+    {
+      "date": "YYYY-MM-DD",
+      "covered_holdings": 2,
+      "requested_holdings": 2,
+      "mom_12_1": 0.11,
+      "mom_6_1": -0.03
+    }
+  ]
+}
+```
+
 Rules:
 - `mode` can be `auto`, `heuristic`, or `llm`.
 - `auto` tries LLM and falls back to heuristic if unavailable.
@@ -119,6 +165,183 @@ Rules:
     "key_risks": ["..."],
     "drift_summary": ["..."],
     "watchouts": ["..."]
+  }
+}
+```
+
+## `POST /positions/events`
+
+Appends position lifecycle events to the parquet-backed event log.
+
+### Request schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "events": [
+    {
+      "event_id": "optional-idempotency-key",
+      "event_time": "2025-01-02T14:30:00Z",
+      "ticker": "AAPL",
+      "event_type": "TRADE",
+      "quantity": 100.0,
+      "side": "BUY",
+      "price": 180.5,
+      "fees": 1.0,
+      "split_ratio": null,
+      "cash_amount_per_share": null,
+      "source": "manual"
+    }
+  ]
+}
+```
+
+Rules:
+- `event_type` supports `TRADE`, `MANUAL_ADJUSTMENT` (`ADJUSTMENT` alias), `SPLIT`, `DIVIDEND` (`CASH_DIVIDEND` alias).
+
+## `GET /positions/events`
+
+Reads stored events for a portfolio.
+
+Query params:
+- `portfolio_id` (required)
+- `ticker` (optional)
+- `as_of` (optional ISO datetime filter)
+- `limit` (optional; default `200`)
+
+## `POST /positions/snapshot`
+
+Builds a point-in-time snapshot by folding events in time order.
+
+### Request schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31T21:00:00Z",
+  "include_closed": false
+}
+```
+
+### Response schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31T21:00:00+00:00",
+  "event_count": 42,
+  "totals": {
+    "tickers": 3,
+    "open_positions": 2,
+    "long_positions": 1,
+    "short_positions": 1,
+    "realized_pnl": 2500.0,
+    "dividends_pnl": 120.0,
+    "total_pnl": 2620.0
+  },
+  "rows": [
+    {
+      "ticker": "AAPL",
+      "quantity": 80.0,
+      "avg_cost": 182.1,
+      "market_price": 195.0,
+      "price_as_of": "2025-12-30",
+      "market_value": 15600.0,
+      "realized_pnl": 350.0,
+      "dividends_pnl": 40.0,
+      "total_pnl": 390.0,
+      "unrealized_pnl": 1032.0,
+      "economic_total_pnl": 1422.0,
+      "last_event_time": "2025-12-18T14:35:00+00:00"
+    }
+  ]
+}
+```
+
+Notes:
+- `market_price` comes from cached `data/cache/yfinance/prices/{TICKER}.parquet`.
+- `price_as_of` is the latest cached date used (<= requested `as_of` date).
+- `total_pnl` remains realized + dividends only.
+- `economic_total_pnl` = realized + dividends + unrealized.
+- `change_reasons` lists drivers seen for each ticker (`trade`, `manual_adjustment`, `split`, `dividend`).
+
+## `POST /portfolio/realtime/analytics`
+
+Builds analytics from latest event-sourced positions + latest cached prices, then feeds holdings into the existing factor risk engine.
+
+### Request schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31"
+}
+```
+
+## `POST /portfolio/eod/analytics`
+
+Builds analytics from event-sourced positions using official close prices for `as_of`.
+
+### Request schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31",
+  "strict_close": true
+}
+```
+
+Notes:
+- `strict_close=true` requires exact `as_of` close in cached prices.
+- If `strict_close=false`, the latest cached price on/before `as_of` is used.
+
+## `POST /portfolio/reconcile/close`
+
+Returns realtime-close vs eod-close deltas for PnL, exposures, and risk.
+
+### Request schema
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31"
+}
+```
+
+### Response schema (shape)
+```json
+{
+  "portfolio_id": "demo_book",
+  "as_of": "2025-12-31",
+  "realtime": {"positions": {}, "analytics": {}},
+  "eod": {"positions": {}, "analytics": {}},
+  "deltas": {
+    "market_value": 12.3,
+    "unrealized_pnl": 12.3,
+    "economic_total_pnl": 12.3,
+    "annualized_vol": 0.001,
+    "exposure_delta": {"mom_12_1": 0.02},
+    "unpriced_tickers": {"realtime": [], "eod": []}
+  }
+}
+```
+
+### Response schema (shape)
+```json
+{
+  "portfolio_id": "demo_book",
+  "requested_as_of": "2025-12-31",
+  "resolved_as_of": "2025-12-31",
+  "positions": {
+    "event_count": 42,
+    "open_tickers": 5,
+    "priced_tickers": 5,
+    "unpriced_tickers": [],
+    "market_value": 100000.0,
+    "gross_market_value": 100000.0,
+    "rows": [
+      {"ticker": "AAPL", "quantity": 100, "avg_cost": 180.5, "change_reasons": ["trade"]}
+    ]
+  },
+  "analytics": {
+    "as_of": "2025-12-31",
+    "factor_exposures": {"mom_12_1": 0.1},
+    "risk": {"annualized_vol": 0.2}
   }
 }
 ```

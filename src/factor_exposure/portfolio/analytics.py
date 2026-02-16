@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from factor_exposure.model.artifacts import ModelArtifacts
+from factor_exposure.positions.engine import build_snapshot
+from factor_exposure.positions.store import load_events
+from factor_exposure.positions.valuation import (
+    load_cached_prices_on_date,
+    load_latest_cached_prices,
+    unrealized_pnl,
+)
 
 
 def _normalize_weights(holdings: List[Tuple[str, float]]) -> List[Tuple[str, float]]:
@@ -341,3 +349,230 @@ def portfolio_attribution(
         }
 
     return response
+
+
+def portfolio_realtime_analytics(
+    portfolio_id: str,
+    artifacts: ModelArtifacts,
+    as_of: Optional[date] = None,
+    data_root: Path | None = None,
+) -> Dict[str, object]:
+    portfolio_id = portfolio_id.strip()
+    if not portfolio_id:
+        raise ValueError("portfolio_id must be non-empty")
+
+    as_of_date = as_of or artifacts.as_of
+    cutoff_dt = datetime.combine(as_of_date, time.max)
+
+    events = load_events(portfolio_id=portfolio_id, as_of=cutoff_dt, data_root=data_root)
+    if not events:
+        raise ValueError("No position events found for portfolio_id")
+
+    snapshot = build_snapshot(events=events, as_of=cutoff_dt, include_closed=False)
+    if not snapshot:
+        raise ValueError("No open positions after applying events")
+
+    rows = sorted(snapshot.values(), key=lambda r: r.ticker)
+    price_map = load_latest_cached_prices(tickers=[r.ticker for r in rows], as_of=cutoff_dt, data_root=data_root)
+    return _positions_analytics_result(
+        mode="realtime",
+        portfolio_id=portfolio_id,
+        as_of_date=as_of_date,
+        rows=rows,
+        price_map=price_map,
+        artifacts=artifacts,
+        event_count=len(events),
+    )
+
+
+def portfolio_eod_analytics(
+    portfolio_id: str,
+    artifacts: ModelArtifacts,
+    as_of: Optional[date] = None,
+    data_root: Path | None = None,
+    strict_close: bool = True,
+) -> Dict[str, object]:
+    portfolio_id = portfolio_id.strip()
+    if not portfolio_id:
+        raise ValueError("portfolio_id must be non-empty")
+
+    as_of_date = as_of or artifacts.as_of
+    cutoff_dt = datetime.combine(as_of_date, time.max)
+
+    events = load_events(portfolio_id=portfolio_id, as_of=cutoff_dt, data_root=data_root)
+    if not events:
+        raise ValueError("No position events found for portfolio_id")
+
+    snapshot = build_snapshot(events=events, as_of=cutoff_dt, include_closed=False)
+    if not snapshot:
+        raise ValueError("No open positions after applying events")
+
+    rows = sorted(snapshot.values(), key=lambda r: r.ticker)
+    price_map = load_cached_prices_on_date(
+        tickers=[r.ticker for r in rows],
+        as_of=as_of_date,
+        data_root=data_root,
+        exact=strict_close,
+    )
+    return _positions_analytics_result(
+        mode="eod",
+        portfolio_id=portfolio_id,
+        as_of_date=as_of_date,
+        rows=rows,
+        price_map=price_map,
+        artifacts=artifacts,
+        strict_close=strict_close,
+        event_count=len(events),
+    )
+
+
+def reconcile_close_analytics(
+    portfolio_id: str,
+    artifacts: ModelArtifacts,
+    as_of: Optional[date] = None,
+    data_root: Path | None = None,
+) -> Dict[str, object]:
+    as_of_date = as_of or artifacts.as_of
+    realtime = portfolio_realtime_analytics(
+        portfolio_id=portfolio_id,
+        artifacts=artifacts,
+        as_of=as_of_date,
+        data_root=data_root,
+    )
+    eod = portfolio_eod_analytics(
+        portfolio_id=portfolio_id,
+        artifacts=artifacts,
+        as_of=as_of_date,
+        data_root=data_root,
+        strict_close=True,
+    )
+
+    rt_analytics = realtime["analytics"]
+    eod_analytics = eod["analytics"]
+    factors = sorted(set(rt_analytics["factor_exposures"]) | set(eod_analytics["factor_exposures"]))
+    exposure_delta = {
+        f: float(rt_analytics["factor_exposures"].get(f, 0.0) - eod_analytics["factor_exposures"].get(f, 0.0))
+        for f in factors
+    }
+    return {
+        "portfolio_id": portfolio_id.strip(),
+        "as_of": as_of_date.isoformat(),
+        "realtime": realtime,
+        "eod": eod,
+        "deltas": {
+            "market_value": float(realtime["positions"]["market_value"] - eod["positions"]["market_value"]),
+            "unrealized_pnl": float(realtime["positions"]["unrealized_pnl"] - eod["positions"]["unrealized_pnl"]),
+            "economic_total_pnl": float(
+                realtime["positions"]["economic_total_pnl"] - eod["positions"]["economic_total_pnl"]
+            ),
+            "annualized_vol": float(
+                rt_analytics["risk"]["annualized_vol"] - eod_analytics["risk"]["annualized_vol"]
+            ),
+            "exposure_delta": exposure_delta,
+            "unpriced_tickers": {
+                "realtime": realtime["positions"]["unpriced_tickers"],
+                "eod": eod["positions"]["unpriced_tickers"],
+            },
+        },
+    }
+
+
+def _positions_analytics_result(
+    mode: str,
+    portfolio_id: str,
+    as_of_date: date,
+    rows: list,
+    price_map: Dict[str, Dict[str, object]],
+    artifacts: ModelArtifacts,
+    strict_close: bool = False,
+    event_count: Optional[int] = None,
+) -> Dict[str, object]:
+    
+    holdings_mv: List[Tuple[str, float]] = []
+    unpriced: List[str] = []
+    position_rows = []
+    total_realized = float(sum(r.realized_pnl for r in rows))
+    total_dividends = float(sum(r.dividends_pnl for r in rows))
+    total_realized_and_div = float(sum(r.total_pnl for r in rows))
+    total_unrealized = 0.0
+    for row in rows:
+        px = price_map.get(row.ticker)
+        if px is None:
+            unpriced.append(row.ticker)
+            position_rows.append(
+                {
+                    "ticker": row.ticker,
+                    "quantity": row.quantity,
+                    "avg_cost": row.avg_cost,
+                    "market_price": None,
+                    "price_as_of": None,
+                    "market_value": None,
+                    "realized_pnl": row.realized_pnl,
+                    "dividends_pnl": row.dividends_pnl,
+                    "total_pnl": row.total_pnl,
+                    "unrealized_pnl": None,
+                    "economic_total_pnl": None,
+                    "change_reasons": row.change_reasons,
+                }
+            )
+            continue
+        market_price = float(px["price"])
+        price_as_of = px["date"].isoformat()
+        mv = float(row.quantity * market_price)
+        unrealized = unrealized_pnl(quantity=row.quantity, avg_cost=row.avg_cost, market_price=market_price)
+        total_unrealized += unrealized
+        if abs(mv) > 1e-12:
+            holdings_mv.append((row.ticker, mv))
+        position_rows.append(
+            {
+                "ticker": row.ticker,
+                "quantity": row.quantity,
+                "avg_cost": row.avg_cost,
+                "market_price": market_price,
+                "price_as_of": price_as_of,
+                "market_value": mv,
+                "realized_pnl": row.realized_pnl,
+                "dividends_pnl": row.dividends_pnl,
+                "total_pnl": row.total_pnl,
+                "unrealized_pnl": unrealized,
+                "economic_total_pnl": float(row.total_pnl + unrealized),
+                "change_reasons": row.change_reasons,
+            }
+        )
+
+    if not holdings_mv:
+        raise ValueError(f"No priced open positions available for {mode} analytics")
+
+    exposure_dates = sorted({d for d, _ in artifacts.exposures.keys()})
+    if not exposure_dates:
+        raise ValueError("No exposure history in model artifacts")
+    resolved_as_of = max((d for d in exposure_dates if d <= as_of_date), default=exposure_dates[-1])
+
+    analytics = portfolio_analytics(holdings=holdings_mv, artifacts=artifacts, as_of=resolved_as_of)
+
+    market_value = float(sum(v for _, v in holdings_mv))
+    gross_market_value = float(sum(abs(v) for _, v in holdings_mv))
+    economic_total = float(total_realized_and_div + total_unrealized)
+
+    return {
+        "mode": mode,
+        "portfolio_id": portfolio_id,
+        "requested_as_of": as_of_date.isoformat(),
+        "resolved_as_of": resolved_as_of.isoformat(),
+        "strict_close": bool(strict_close),
+        "positions": {
+            "event_count": event_count,
+            "open_tickers": len(rows),
+            "priced_tickers": len(holdings_mv),
+            "unpriced_tickers": unpriced,
+            "market_value": market_value,
+            "gross_market_value": gross_market_value,
+            "realized_pnl": total_realized,
+            "dividends_pnl": total_dividends,
+            "total_pnl": total_realized_and_div,
+            "unrealized_pnl": total_unrealized,
+            "economic_total_pnl": economic_total,
+            "rows": position_rows,
+        },
+        "analytics": analytics,
+    }
